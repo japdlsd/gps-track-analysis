@@ -1,0 +1,198 @@
+---
+title: "First analysis of GPS tracks"
+author: "Askar Gafurov"
+date: "June 18, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+data <- read.csv("parsed_data/20081019.gpx.csv")
+#data <- data[200:dim(data)[1],]
+data$t <- (data$t - data[1, "t"]) / 60
+
+
+```
+
+```{r, fig.width=10}
+#cols <- rainbow(max(data$tracknum) + 1)[data$tracknum + 1]
+n <- dim(data)[1]
+cols <- rainbow(round((data[n, "t"] - data[1, "t"])/100) + 1)[round((data$t - data[1, "t"])/100) + 1]
+par(mfrow=c(1,2))
+plot(data$lon, data$lat, col=cols, cex=0.1)
+plot(data$ele, col=cols, cex=0.1)
+```
+
+```{r, fig.height=6, fig.width=10}
+library(scatterplot3d)
+#cols <- rainbow(max(data$tracknum) + 1)[data$tracknum + 1]
+n <- dim(data)[1]
+cols <- rainbow(round((data[n, "t"] - data[1, "t"])/100) + 1)[round((data$t - data[1, "t"])/100) + 1]
+scatterplot3d(data$lon, data$lat, data$t, color=cols, cex.symbols = 0.1)
+#scatterplot3d(data$lon, data$lat, data$ele, color=rainbow(dim(data)[1]), cex.symbols = 0.1)
+```
+
+```{r eval_diff}
+
+geodiff <- function (data, k=1) {
+  require(geosphere)
+  new_colnames <- c("dist", "bearing", "dt", "t", "tracknum", "ele", "dele")
+  diffdata <- matrix(0, dim(data)[1] - k, length(new_colnames))
+  colnames(diffdata) <- new_colnames
+  
+  diffdata <- as.data.frame(diffdata)
+  
+  for (i in 1:(dim(data)[1] - k)) {
+    # distance in meters
+    #diffdata[i, "dist"] <- distm(c(data[i, "lon"], data[i, "lat"]), c(data[i+k, "lon"], data[i+k, "lat"]), fun = distHaversine)
+    diffdata[i, "dist"] <- distm(c(data[i, "lon"], data[i, "lat"]), c(data[i+k, "lon"], data[i+k, "lat"]), fun = distVincentyEllipsoid)
+    # bearing
+    diffdata[i, "bearing"] <- bearingRhumb(c(data[i, "lon"], data[i, "lat"]), c(data[i+k, "lon"], data[i+k, "lat"]))
+    if (is.na(diffdata[i, "bearing"])) {
+      diffdata[i, "bearing"] <- 0
+    }
+    diffdata[i, "dt"] <- data[i+k,"t"] - data[i, "t"]
+    diffdata[i, "t"] <- data[i, "t"]
+    diffdata[i, "tracknum"] <- data[i, "tracknum"]
+    diffdata[i, "ele"] <- data[i, "ele"]
+    diffdata[i, "dele"] <- data[i + k, "ele"] - data[i, "ele"]
+  }
+  return(diffdata)
+}
+
+ddata1 <- geodiff(data, k=1)
+ddata10 <- geodiff(data, k=10)
+ddata40 <- geodiff(data, k=40)
+```
+
+```{r eval_diff_min}
+geodiff_time <- function (data, min_time=60/60) {
+  require(geosphere)
+  new_colnames <- c("dist", "bearing", "dt", "t", "tracknum")
+  diffdata <- matrix(0, dim(data)[1] - 1, length(new_colnames))
+  colnames(diffdata) <- new_colnames
+  
+  diffdata <- as.data.frame(diffdata)
+  
+  k <- 1
+  for (i in 1:(dim(data)[1] - 1)) {
+    # distance in meters
+    #diffdata[i, "dist"] <- distm(c(data[i, "lon"], data[i, "lat"]), c(data[i+k, "lon"], data[i+k, "lat"]), fun = distHaversine)
+    while (i + k < dim(data)[1] && data[i+k, "t"] - data[i, "t"] < min_time) {
+      k <- k+1
+    }
+    diffdata[i, "dist"] <- distm(c(data[i, "lon"], data[i, "lat"]), c(data[i+k, "lon"], data[i+k, "lat"]), fun = distVincentyEllipsoid)
+    # bearing
+    diffdata[i, "bearing"] <- bearingRhumb(c(data[i, "lon"], data[i, "lat"]), c(data[i+k, "lon"], data[i+k, "lat"]))
+    if (is.na(diffdata[i, "bearing"])) {
+      diffdata[i, "bearing"] <- 0
+    }
+    diffdata[i, "dt"] <- data[i+k,"t"] - data[i, "t"]
+    diffdata[i, "t"] <- data[i, "t"]
+    diffdata[i, "tracknum"] <- data[i, "tracknum"]
+    diffdata[i, "ele"] <- data[i, "ele"]
+    diffdata[i, "dele"] <- data[i + k, "ele"] - data[i, "ele"]
+    k <- k-1
+  }
+  return(diffdata)
+} 
+
+ddatat60 <- geodiff_time(data, min_time = 60/60)
+ddatat200 <- geodiff_time(data, min_time = 200/60)
+ddatat600 <- geodiff_time(data, min_time = 600/60)
+
+```
+
+
+```{r}
+eval_bearing_average <- function(bearings, k=5) {
+  res <- vector(length=length(bearings)-k+1)
+  for (i in 1:(length(bearings)-k+1)) {
+    res[i] <- abs(sum(exp(1i * bearings[i:(i+k-1)] / 360 * 2 * pi)) / k)
+  }
+  return(1 - res)
+}
+
+db5 <- eval_bearing_average(ddata1$bearing, k=5)
+db10 <- eval_bearing_average(ddata1$bearing, k=10)
+db20 <- eval_bearing_average(ddata1$bearing, k=20)
+
+db60_5 <- eval_bearing_average(ddatat60$bearing, k=5)
+db60_10 <- eval_bearing_average(ddatat60$bearing, k=10)
+```
+
+```{r fig.height=8}
+par(mfrow=c(5,1))
+plot(ddata1$t,ddata1$bearing, cex=0.2)
+points(ddata10$t, ddata10$bearing, cex=0.2, col="red")
+points(ddata40$t, ddata40$bearing, cex=0.2, col="green")
+
+plot(ddata1$t[1:length(db5)], db5, cex=0.4, col="blue")
+points(ddata1$t[1:length(db10)], db10, cex=0.3, col="brown")
+points(ddata1$t[1:length(db20)], db20, cex=0.2, col="green")
+
+plot(ddata1$t, (ddata1$dist/ddata1$dt), cex=0.2, ylim=c(0, 40 * 60))
+points(ddata10$t, (ddata10$dist/ddata10$dt), cex=0.2, col="red")
+points(ddata40$t, (ddata40$dist/ddata40$dt), cex=0.2, col="green")
+
+plot(ddata1$t,ddata1$dele, cex=0.2)
+points(ddata10$t, ddata10$dele, cex=0.2, col="red")
+points(ddata40$t, ddata40$dele, cex=0.2, col="green")
+
+hist(ddata1$t, breaks = 100)
+
+```
+
+```{r fig.height=8}
+par(mfrow=c(6,1))
+plot(ddatat60$t,ddatat60$bearing, cex=0.2)
+points(ddatat200$t, ddatat200$bearing, cex=0.2, col="red")
+points(ddatat600$t, ddatat600$bearing, cex=0.2, col="green")
+#points(ddata40$t, ddata40$bearing, cex=0.2, col="green")
+
+plot(ddatat60$t[1:length(db60_5)], db60_5, cex=0.4, col="blue")
+points(ddatat60$t[1:length(db60_10)], db60_10, cex=0.3, col="brown")
+#points(ddata1$t[1:length(db20)], db20, cex=0.2, col="green")
+
+plot(ddatat60$t, (ddatat60$dist/ddatat60$dt), cex=0.2, ylim=c(0, 6000))
+points(ddatat200$t, (ddatat200$dist/ddatat200$dt), cex=0.2, col="red")
+points(ddatat600$t, (ddatat600$dist/ddatat600$dt), cex=0.2, col="green")
+#points(ddata40$t, (ddata40$dist/ddata40$dt), cex=0.2, col="green")
+
+
+plot(ddatat60$t, (ddatat60$dist), cex=0.2)
+points(ddatat200$t, (ddatat200$dist), cex=0.2, col="red")
+points(ddatat600$t, (ddatat600$dist), cex=0.2, col="green")
+
+plot(ddatat60$t,ddatat60$dele, cex=0.2)
+points(ddatat200$t, ddatat200$dele, cex=0.2, col="red")
+points(ddatat600$t, ddatat600$dele, cex=0.2, col="green")
+
+hist(ddatat60$t, breaks = 100)
+
+```
+
+```{r, fig.height=6, fig.width=10}
+speed <- c(ddata1$dist/ddata1$dt, 0)
+for (i in 1:length(speed)) {
+  if (speed[i] > 4) {
+    speed[i] <- 13
+  }
+  else if (speed[i] < 0 ) {
+    speed[i] <- 0
+  }
+  else {
+    speed[i] <- round(speed[i] * 3)
+  }
+}
+cols <- rainbow(14)[speed + 1]
+
+scatterplot3d(data$lon, data$lat, data$ele, color=cols, cex.symbols = 0.1)
+#scatterplot3d(data$lon, data$lat, data$ele, color=cols, cex.symbols = 1.2 - 0.3 * log(speed + 2))
+#scatterplot3d(data$lon, data$lat, data$ele, color=rainbow(dim(data)[1]), cex.symbols = 0.1)
+```
+```
+

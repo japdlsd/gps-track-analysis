@@ -1,0 +1,251 @@
+---
+title: "hmm first try"
+author: "Askar Gafurov"
+output:
+  html_document: default
+---
+
+```{r load_dataset, cache=TRUE}
+#datapaths <- paste("parsed_data/200810", c("09", "10", "11", "12", "13", "17", "18", "19", "20", "21", "22", "23", "24", "25"), ".gpx.csv", sep = "")
+datapaths <- paste("parsed_data/200810", c("09", "10", "11", "12", "17", "18", "19", "20", "21", "22", "23", "24"), ".gpx.csv", sep = "")
+
+datasets <- list()
+for(i in 1:length(datapaths)) {
+  p <- datapaths[i]
+  data <- read.csv(p)
+  datasets[[i]] <- data
+}
+```
+
+```{r preprocess_data_geodiff, cache=TRUE, dependson=c("load_dataset")}
+geodiff_time <- function (data, min_time=60) {
+  require(geosphere)
+  if (dim(data)[1] < 2) {
+    return(NA)
+  }
+  new_colnames <- c("dist", "bearing", "dt", "t", "tracknum")
+  diffdata <- matrix(0, dim(data)[1] - 1, length(new_colnames))
+  colnames(diffdata) <- new_colnames
+  
+  diffdata <- as.data.frame(diffdata)
+  
+  k <- 1
+  for (i in 1:(dim(data)[1] - 1)) {
+    # distance in meters
+    #diffdata[i, "dist"] <- distm(c(data[i, "lon"], data[i, "lat"]), c(data[i+k, "lon"], data[i+k, "lat"]), fun = distHaversine)
+    while (i + k < dim(data)[1] && data[i+k, "t"] - data[i, "t"] < min_time) {
+      k <- k+1
+    }
+    diffdata[i, "dist"] <- distm(c(data[i, "lon"], data[i, "lat"]), c(data[i+k, "lon"], data[i+k, "lat"]), fun = distVincentyEllipsoid)
+    # bearing
+    diffdata[i, "bearing"] <- bearingRhumb(c(data[i, "lon"], data[i, "lat"]), c(data[i+k, "lon"], data[i+k, "lat"]))
+    if (is.na(diffdata[i, "bearing"])) {
+      diffdata[i, "bearing"] <- 0
+    }
+    diffdata[i, "dt"] <- data[i+k,"t"] - data[i, "t"]
+    diffdata[i, "t"] <- data[i, "t"]
+    diffdata[i, "tracknum"] <- data[i, "tracknum"]
+    diffdata[i, "ele"] <- data[i, "ele"]
+    diffdata[i, "dele"] <- data[i + k, "ele"] - data[i, "ele"]
+    k <- k-1
+  }
+  return(diffdata)
+}
+
+ddata <- list()
+for (i in 1:length(datasets)) {
+  ddata[[i]] <- geodiff_time(datasets[[i]], min_time = 60)
+}
+
+for (i in 1:length(ddata)) {
+  if (is.na(ddata[[i]])[1]) {
+    print(paste(datapaths[i], "is NA!!"))
+  }
+  else {
+    print(paste(datapaths[i], "is OK :)"))
+  }
+}
+```
+
+```{r preprocess_data_db, cache=TRUE, dependson=c("preprocess_data_geodiff")}
+eval_bearing_average <- function(bearings, k=5) {
+  res <- vector(length=length(bearings)-k+1)
+  for (i in 1:(length(bearings)-k+1)) {
+    res[i] <- abs(sum(exp(1i * bearings[i:(i+k-1)] / 360 * 2 * pi)) / k)
+  }
+  res <- c(res, as.vector(matrix(0, nrow=k-1, ncol=1)))
+  return(1 - res)
+}
+
+for (i in 1:length(ddata)) {
+  ddata[[i]]$db <- eval_bearing_average(ddata[[i]]$bearing, k=10)
+}
+```
+
+
+```{r preprocess_data, cache=TRUE, dependson=c("preprocess_data_geodiff", "preprocess_data_db")}
+
+```
+
+# 4 states: car, car_stop, walk_stop, walk
+
+
+```{r def_hmm1, cache=TRUE}
+
+init_prob <- list(walk=1/4, car=1/4, walk_stop=1/4, car_stop=1/4)
+
+#transition_pp <- matrix(c(0.99, 0.01, 0.01, 0.99), nrow = 2, ncol=2, byrow=TRUE, dimnames = list(c("walk", "car"), c("walk", "car")))
+transition_pp <- matrix(c(
+  0.9, 0, 0.1, 0,
+  0, 0.9, 0, 0.1,
+  0.09, 0, 0.9, 0.01,
+  0, 0.09, 0.01, 0.9
+), nrow = length(init_prob), ncol=length(init_prob), byrow=TRUE, dimnames = list( names(init_prob), names(init_prob) ))
+print(transition_pp)
+
+#xs <- seq(0.001, 40, by=0.05)
+#plot(xs, dnorm(xs, mean = 1, sd = 1) / (1 - pnorm(0, mean=1, sd=1)), type="l", xlab="speed (m/s)", ylab="density", main="speed distribution", col="green")
+#lines(xs, dunif(xs, min = 0, max=60), col="red")
+
+walk_em <- function (dato) {
+  # normal distribution
+  speed <- dato["dist"] / dato["dt"]
+  db <- as.numeric(dato["db"] * 10)
+  res <- as.numeric(dnorm(as.numeric(speed), mean = 1, sd = 1) / (1 - pnorm(0, mean=1, sd=1)) * dexp(db, rate=0.5)) 
+  return(res)
+}
+
+car_em <- function (dato) {
+  speed <- as.numeric(dato["dist"] / dato["dt"])
+  db <- as.numeric(dato["db"] * 10)
+  res <- as.numeric(dunif(speed, min=1, max=60) * dexp(db, rate=1))
+  return(res)
+}
+
+walk_stop_em <- function (dato) {
+  speed <- as.numeric(dato["dist"]/dato["dt"])
+  db <- as.numeric(dato["db"])
+  res <- as.numeric(dexp(speed * 2, rate=4) * dunif(db, min=0, max=1))
+  return(res)
+}
+
+
+car_stop_em <- function (dato) {
+  speed <- as.numeric(dato["dist"]/dato["dt"])
+  db <- as.numeric(dato["db"])
+  res <- as.numeric(dexp(speed * 2, rate=4) * dunif(db, min=0, max=1))
+  return(res)
+}
+
+emission_pp_f <- list(walk = walk_em, car = car_em, walk_stop=walk_stop_em, car_stop=car_stop_em)
+
+test_data <- data.frame(dist=c(20, 20, 20, 300, 300, 300, 300, 0, 10, 10), dt=c(10, 10, 10, 10, 10, 10, 10, 10, 10, 10), db=c(0.2, 0.2, 0.2, 0.1, 0, 0, 0.3, 0.7, 0.2, 0.2))
+print(emission_pp_f[["walk"]](test_data[1,]))
+print(emission_pp_f[["walk"]](test_data[2,]))
+
+print(emission_pp_f[["car"]](test_data[1,]))
+print(emission_pp_f[["car"]](test_data[2,]))
+```
+
+```{r def_viterbi, cache=TRUE}
+get_viterbi_path <- function (transition_pp, emission_pp_f, init_prob, data) {
+  if (is.na(data)[1]) return(NA)
+  states <- rownames(transition_pp)
+  S <- length(states)
+  N <- dim(data)[1]
+  # prob of the best path so far
+  T1 <- matrix(0, nrow=S, ncol=N)
+  # tail of the best path so far
+  T2 <- matrix(0, nrow=S, ncol=N)
+  
+  for (i in 1:S) {
+    T1[i, 1] <- log(init_prob[[states[i]]]) + log(emission_pp_f[[states[i]]](data[1,]))
+    T2[i, 1] <- 0
+  }
+  
+  for (i in 2:N) {
+    #print(paste("i:", i))
+    for (j in 1:S) {
+      #print(paste("j:", j))
+      poss <- T1[, i-1]  +  log(transition_pp[, j])
+      #print(paste("poss:", poss))
+      best <- which.max(poss)
+      #print(paste("best:", best))
+      T1[j, i] <- log(emission_pp_f[[states[j]]](data[i,])) + poss[best]
+      T2[j, i] <- best
+    }
+  }
+  
+  #print(T1)
+  #print(T2)
+  
+  path <- vector(length=N)
+  path[N] <- which.max(T1[, N])
+  for (i in seq(N-1, 1, by=-1)) {
+    path[i] <- T2[path[i+1], i+1]
+  }
+  
+  return(list(path=path, T1=T1, T2=T2))
+}
+
+vres <- get_viterbi_path(transition_pp, emission_pp_f, init_prob, test_data)
+print(vres$path)
+```
+
+```{r eval_viterbi, cache=TRUE, dependson=c("def_viterbi", "preprocess_data", "def_hmm1")}
+vres <- list()
+for (i in 1:length(ddata)) {
+  vres[[i]] <- get_viterbi_path(transition_pp, emission_pp_f, init_prob, ddata[[i]])
+  if (is.na(vres[[i]])[1]) {
+    print(paste(i, "is bad!!"))
+  }
+  else {
+    print(paste(i, "is good!"))
+  }
+}
+```
+
+# Classification
+
+```{r, cache=TRUE, dependson=c("eval_viterbi"), fig.width=14, fig.height=20}
+par(mfrow=c(6, 2))
+plte <- c("green", "red", "blue", "purple")
+for (i in 1:length(ddata)) {
+  if (is.na(ddata[[i]])[1]) next;
+  xs <- (ddata[[i]]$t - ddata[[i]]$t[1])/60
+  ys <- ddata[[i]]$dist/ddata[[i]]$dt
+  cols <- plte[vres[[i]]$path]
+  pointnum <- dim(ddata[[i]])[1]
+  total_time <- round((ddata[[i]][pointnum, "t"] - ddata[[i]][1, "t"]) / 60 / 60, digits=2)
+  plot(xs, ys, col=cols, cex=0.1, main=paste("D", i, "#p:", pointnum, "h:", total_time), xlab=NA, ylab=NA)
+  points(xs, ddata[[i]]$db * max(ys), cex=0.3, pch=2)
+}
+```
+
+
+```{r, cache=TRUE, dependson=c("eval_viterbi"), fig.width=14, fig.height=20}
+require(scatterplot3d)
+par(mfrow=c(5, 3))
+plte <- c("green", "red", "blue", "purple")
+for (i in 1:length(datasets)) {
+  if (is.na(ddata[[i]])[1]) next;
+  #xs <- (ddata[[i]]$t - ddata[[i]]$t[1])/60
+  #ys <- ddata[[i]]$dist/ddata[[i]]$dt
+  cols <- c(plte[vres[[i]]$path], "black" )
+  pointnum <- dim(ddata[[i]])[1]
+  total_time <- round((ddata[[i]][pointnum, "t"] - ddata[[i]][1, "t"]) / 60 / 60, digits=2)
+  
+  scatterplot3d(datasets[[i]]$lon, datasets[[i]]$lat, datasets[[i]]$ele, color=cols, cex.symbols = 0.1, xlab = NA, ylab=NA, zlab=NA, bg="grey")
+  #scatterplot3d(datasets[[i]]$lon, datasets[[i]]$lat, (datasets[[i]]$t - datasets[[i]]$t[1])/60, color=cols, cex.symbols = 0.1, xlab = NA, ylab=NA, zlab=NA)
+  #plot(xs, ys, col=cols, cex=0.1, main=paste("D", i, "#p:", pointnum, "h:", total_time), xlab=NA, ylab=NA)
+}
+```
+
+```{r}
+require(corrplot)
+d <- 7
+for (i in 1:length(init_prob)) {
+  pairs(~., data=ddata[[d]][vres[[d]]$path == i,], cex=0.2, col=plte[i])
+}
+```
+
